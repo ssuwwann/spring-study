@@ -7,40 +7,62 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Consumer;
 import java.util.stream.IntStream;
 
+/**
+ * BlockingQueue로 작업 관리
+ * 4개의 워커 스레드가 동시에 작업 처리
+ * 각 스레드가 처리한 결과를 저장
+ *
+ * @param <T>
+ */
 public class QueueWorker<T> {
-  private final BlockingQueue<T> queue; // 작업이 담김
+
+  private final BlockingQueue<T> queue;
   private final ExecutorService executor;
   private final Consumer<T> taskProcessor;
+  private final String workerName;
 
-  public QueueWorker(int workerCount, Consumer<T> taskProcessor) {
-    this.queue = new LinkedBlockingQueue<>(1_000); // MAX = 1000
-    this.executor = Executors.newFixedThreadPool(workerCount); // count = 4 (4개의 스레드)
+  public QueueWorker(String workerName, int queueSize, int workerCount, Consumer<T> taskProcessor) {
     this.taskProcessor = taskProcessor;
+    this.queue = new LinkedBlockingQueue<>(queueSize);
+    this.executor = Executors.newFixedThreadPool(workerCount);
+    this.workerName = workerName;
 
-    // 워커 스레드 시작
+    System.out.printf("[%s] %d개의 워커 스레드 시작%n", workerName, workerCount);
     IntStream.range(0, workerCount)
             .forEach(i -> executor.submit(this::processQueue));
   }
 
   private void processQueue() {
-    // 조건 = 중단 요청이 있다면
+    String threadName = Thread.currentThread().getName();
+    System.out.printf("[%s-%s] 워커 스레드 시작됨%n", workerName, threadName);
+
     while (!Thread.currentThread().isInterrupted()) {
       try {
-        T task = queue.take(); // 작업 가져오기
-        taskProcessor.accept(task); // 작업 처리
+        T task = queue.take();
+        System.out.printf("[%s-%s] 작업 처리 시작: %s%n", workerName, threadName, task);
+        taskProcessor.accept(task);
       } catch (InterruptedException e) {
-        Thread.currentThread().interrupt(); // 중단 시키기
+        Thread.currentThread().interrupt();
+        System.out.printf("[%s-%s] 워커 스레드 종료%n", workerName, threadName);
         break;
       }
     }
   }
 
-  public void submitTask(T task) {
-    queue.offer(task);
+  public boolean submitTask(T task) {
+    boolean success = queue.offer(task);
+    if (success) System.out.printf("[%s] 큐에 작업 추가: %s (현재 큐 크기: %d)%n", workerName, task, queue.size());
+    else System.out.printf("[%s] 큐가 가득참! 작업 추가 실패: %s%n", workerName, task);
+
+    return success;
   }
 
   public void shutdown() {
+    System.out.printf("[%s] 종료 시작\n", workerName);
     executor.shutdown();
   }
 
+  public int getQueueSize() {
+    return queue.size();
+  }
 }
