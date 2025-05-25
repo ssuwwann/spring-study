@@ -1,6 +1,7 @@
 package com.suwan.qworker;
 
 import com.suwan.qworker.model.NumberTask;
+import com.suwan.qworker.model.ProducerResult;
 import com.suwan.qworker.producer.RandomNumberProcessor;
 import com.suwan.qworker.worker.QueueWorker;
 import org.springframework.boot.ApplicationRunner;
@@ -8,9 +9,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.IntStream;
 
 @SpringBootApplication
 public class QworkerApplication {
@@ -18,35 +18,20 @@ public class QworkerApplication {
   @Bean
   ApplicationRunner run() {
     return args -> {
-      System.out.println("===== Producer-Consumer 패턴 시작 =====\n");
+      System.out.println("===== CompletableFuture");
 
-      // 설정
-      final int TASK_COUNT = 20; // 생성할 작업 수
-      final int MAX_NUMBER = 1000;   // 랜덤 숫자 범위 (0~1000)
-      final int WORKER_COUNT = 4;    // 워커 스레드 수
-      final int QUEUE_SIZE = 50;     // 큐 크기
-
-      // 각 스레드별 결과 저장
-      ConcurrentHashMap<String, Integer> threadResults = new ConcurrentHashMap<>();
-      ConcurrentHashMap<String, Integer> threadTaskCount = new ConcurrentHashMap<>();
-      AtomicInteger proccessCount = new AtomicInteger(0);
-      CountDownLatch latch = new CountDownLatch(TASK_COUNT);
-
-      // 1. consumer (QueueWorker) 생성
-      QueueWorker<NumberTask> queueWorker = new QueueWorker<>(
-              "NumberWorker",
-              QUEUE_SIZE,
-              WORKER_COUNT,
+      // 1. QueueWorker 생성(Consumer)
+      // 1부터 count 합을 계산하는 function
+      QueueWorker<NumberTask, Integer> queueWorker = new QueueWorker<>(
+              "RandomWorker",
+              1_000,
+              4,
               task -> {
-                String threadName = Thread.currentThread().getName();
+                // 1부터 task.count() 까지의 합 계산
+                int sum = IntStream.rangeClosed(1, task.number()).sum();
 
-                // 각 스레드가 처리한 숫자를 누적
-                threadResults.merge(threadName, task.number(), (i1, i2) -> i1 + i2);
-                threadTaskCount.merge(threadName, 1, Integer::sum);
-
-                int currentProcessed = proccessCount.incrementAndGet();
-                System.out.printf("[CONSUMER-%s] 처리 중: %s (진행률: %d/%d)%n",
-                        threadName, task, currentProcessed, TASK_COUNT);
+                System.out.printf("[Worker-%s] Task %d: 1~%d 합계 = %d%n",
+                        Thread.currentThread().getName(), task.taskId(), task.number(), sum);
 
                 try {
                   Thread.sleep(100);
@@ -54,40 +39,34 @@ public class QworkerApplication {
                   Thread.currentThread().interrupt();
                 }
 
-                latch.countDown();
+                return sum;
               }
       );
 
-      // 2. producer 생성 및 실행
       RandomNumberProcessor producer = new RandomNumberProcessor(queueWorker);
-      int producerSum = producer.produceRandomNumberTasks(TASK_COUNT, MAX_NUMBER);
 
-      // 3. 모든 작업 완료 대기
-      System.out.println("\n모든 작업이 처리될 때까지 대기 중...");
-      latch.await();
+      // 비동기로 작업 생성 및 처리
+      CompletableFuture<ProducerResult> producerFuture = producer.produceRandomNumberTasksAsync(20, 50);// 20개 작업, 0 ~ 50 범위
 
-      // 4. 결과 집계 및 출력
-      System.out.println("\n=============최종 결과=============");
+      // 결과 대기 및 출력
+      producerFuture.thenAccept(result -> {
+        System.out.println("\n========== 최종 결과 ==========");
+        System.out.println("생성된 숫자들: " + result.generatedNumbers());
+        System.out.println("처리 결과들: " + result.processedResults());
+        System.out.printf("Producer가 생성한 숫자 합: %d%n", result.producerSum());
+        System.out.printf("Consumer가 계산한 결과 합: %d%n", result.consumerSum());
 
-      int totalConsumerSum = 0;
-      for (String thread : threadResults.keySet()) {
-        Integer threadSum = threadResults.get(thread);
-        Integer taskCount = threadTaskCount.get(thread);
-        totalConsumerSum += threadSum;
+        int expectedSum = result.generatedNumbers().stream()
+                .mapToInt(n -> n * (n + 1) / 2)
+                .sum();
 
-        System.out.printf("[%s] 처리한 작업 수: %d개, 합계: %d%n",
-                thread, taskCount, threadSum);
-      }
+        System.out.printf("예상 결과 합: %d%n", expectedSum);
+        System.out.printf("검증: %s%n",
+                expectedSum == result.consumerSum() ? "✓ 성공!" : "✗ 실패!");
+      }).join();
 
-      System.out.println("\n========== 검증 ==========");
-      System.out.printf("Producer가 생성한 숫자들의 합: %d%n", producerSum);
-      System.out.printf("Consumer들이 처리한 숫자들의 합: %d%n", totalConsumerSum);
-      System.out.printf("검증 결과: %s%n",
-              producerSum == totalConsumerSum ? "✓ 성공" : "✗ 실패");
-
-      // 5. 종료
       queueWorker.shutdown();
-      System.out.println("\n===== Producer-Consumer 패턴 종료 =====");
+      System.out.println("\n===== 프로그램 종료 =====");
     };
   }
 
@@ -95,3 +74,21 @@ public class QworkerApplication {
     SpringApplication.run(QworkerApplication.class, args);
   }
 }
+
+/*
+* 1. QueueWorker 생성 (4개 스레드)
+   ↓
+2. Producer가 비동기로 20개 작업 생성
+   - Task(id=0, count=42) → CompletableFuture<Integer>
+   - Task(id=1, count=17) → CompletableFuture<Integer>
+   ...
+   ↓
+3. 각 작업이 QueueWorker에서 처리됨
+   - 1~42의 합 = 903
+   - 1~17의 합 = 153
+   ...
+   ↓
+4. 모든 Future 완료 대기 (allOf)
+   ↓
+5. 결과 수집 및 검증
+* */
