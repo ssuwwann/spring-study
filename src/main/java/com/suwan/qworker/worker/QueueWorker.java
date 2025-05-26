@@ -1,53 +1,52 @@
 package com.suwan.qworker.worker;
 
-import java.util.concurrent.*;
-import java.util.function.Function;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * BlockingQueue로 작업 관리
  * 4개의 워커 스레드가 동시에 작업 처리
  * 각 스레드가 처리한 결과를 저장
  *
- * @param <T>
  */
-public class QueueWorker<T, R> {
+public class QueueWorker {
+  private final BlockingQueue<Integer> queue;
+  private final AtomicInteger sharedSum;
 
-  private final BlockingQueue<T> queue;
-  private final ExecutorService executor;
-  private final Function<T, R> taskProcessor;
-  private final String workerName;
-
-  public QueueWorker(String workerName, int queueSize, int workerCount, Function<T, R> taskProcessor) {
-    this.taskProcessor = taskProcessor;
-    this.queue = new LinkedBlockingQueue<>(queueSize);
-    this.executor = Executors.newFixedThreadPool(workerCount);
-    this.workerName = workerName;
-
-    System.out.printf("[%s] %d개의 워커 스레드 시작%n", workerName, workerCount);
+  public QueueWorker(BlockingQueue<Integer> queue, AtomicInteger sharedSum) {
+    this.queue = queue;
+    this.sharedSum = sharedSum;
   }
 
-  // completableFuture로 처리
-  public CompletableFuture<R> submitTaskAsync(T task) {
-    return CompletableFuture.supplyAsync(() -> {
-      try {
-        queue.put(task); // 큐에 추가
-        T queuedTask = queue.take(); // 큐에서 가져오기
+  // Completable를 반환하는 메서드
+  public CompletableFuture<Integer> consume(){
+    return CompletableFuture.supplyAsync(()->{
+      String threadName = Thread.currentThread().getName();
+      int localSum = 0;
 
-        String threadName = Thread.currentThread().getName();
-        System.out.printf("[%s-%s] 작업 처리: %s%n", workerName, threadName, queuedTask);
+      try{
+        while (true) {
+          //Integer value = queue.poll(1L, TimeUnit.SECONDS);
+          Integer value = queue.take();
+          if (value == -1) {
+            System.out.println(threadName + " 종료!");
+            System.out.println(threadName + " **finished**!");
+            break;
+          }
 
-        return taskProcessor.apply(queuedTask);
-      } catch (InterruptedException e) {
+          localSum += value;
+          int totalSum = sharedSum.addAndGet(value);
+          System.out.printf("%s: %d를 더함, 전체 합계: %d%n", threadName, value, totalSum);
+          System.out.printf("%s: Added %d, total sum: %d%n", threadName, value, totalSum);
+        }
+      }catch(InterruptedException e){
         Thread.currentThread().interrupt();
-        throw new CompletionException(e);
+        throw new RuntimeException(e);
       }
+
+      // 컨슈머가 처리한 합계 반환
+      return localSum;
     });
   }
-
-
-  public void shutdown() {
-    System.out.printf("[%s] 종료 시작\n", workerName);
-    executor.shutdown();
-  }
-
 }
